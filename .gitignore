@@ -1,0 +1,5 @@
+!*.gitkeep
+.venv
+media/*
+__pycache__
+output/*
