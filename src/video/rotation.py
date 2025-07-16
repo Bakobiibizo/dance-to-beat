@@ -1,3 +1,19 @@
+"""Video Generation Module for Beat-Synchronized Rotating Animations.
+
+This module provides the core functionality for creating beat-synchronized
+rotating videos from images and audio files. It includes classes and functions for:
+
+- Frame generation with various visual effects
+- Color wheel management and interpolation
+- Video creation with audio synchronization
+- Effect application (rotation, color shifting, pulsing, beat markers)
+
+The main entry point is the create_rotating_video function, which handles
+the entire process of generating a video from an image and audio file.
+
+This is the canonical implementation for video generation in the library.
+"""
+
 import os
 import cv2
 import numpy as np
@@ -113,6 +129,7 @@ class FrameGenerator:
             if color_wheel_positions is not None and i < len(color_wheel_positions):
                 # Use color wheel interpolation
                 position = color_wheel_positions[i]
+                # Use standard interpolation since we don't have access to the cache here
                 color = interpolate_color_wheel(colors, position)
                 # logging.info(f"Layer {i}: position={position:.2f}, color={color}")
             elif i < len(STARTING_COLORS):  # Use STARTING_COLORS for fixed colors
@@ -341,7 +358,8 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                     scales = []
                     base_scales = BAND_BASE_SCALES  # Base scales for each circle (outer to inner)
                     band_names = ["bass", "low_mid", "high_mid", "high"]
-                    
+                    # Initialize beat intensity for multi-band effect
+                    multi_band_intensity = 0
                     for band_name, base_scale in zip(band_names, base_scales):
                         if band_name in band_envelopes:
                             env = band_envelopes[band_name]
@@ -350,6 +368,7 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                                 env_idx = min(int(frame_idx * len(env) / (fps * duration)), len(env) - 1)
                                 # Scale from base_scale to base_scale*1.3 based on envelope
                                 intensity = env[env_idx]
+                                multi_band_intensity = max(multi_band_intensity, intensity)
                                 # Apply non-linear scaling for more dramatic effect
                                 scale = base_scale + (intensity ** 2) * PULSE_INTENSITY
                                 scales.append(scale)
@@ -360,6 +379,7 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                     
                     # If color_shift is also enabled, calculate color wheel positions for each layer
                     color_wheel_positions = None
+                    
                     if 'color_shift' in effects:
                         # Calculate different positions for each layer
                         # Each layer will have a different starting position and speed
@@ -449,19 +469,10 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                     M = cv2.getRotationMatrix2D(center, angle, scale)
                     frame = cv2.warpAffine(frame, M, (width, height), flags=cv2.INTER_LINEAR, 
                                           borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
-                
-                # Default case: just rotation, no pulse
-                else:
-                    frame = frame_gen.image.copy()
-                    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-                    frame = cv2.warpAffine(frame, M, (width, height), flags=cv2.INTER_LINEAR, 
-                                          borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
-
-                if 'color_shift' in effects:
-                    # Map angle to position in color wheel (0-1)
-                    # Divide by 360 to normalize to 0-1 range
-                    position = (angle / 360.0) % 1.0
                     
+                    # Initialize beat intensity for beat marker effect
+                    beat_intensity = 0
+                
                     # Apply color wheel shift using the STARTING_COLORS from config
                     if len(beat_frames_array) > 0:  # Make sure we have beats to check
                         # Find the closest beat to current frame
@@ -476,7 +487,7 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                             if distance < 3:  # Within 3 frames of a beat
                                 # Linear falloff with distance
                                 intensity = MARKER_INTENSITY * (1.0 - (distance / 3.0))
-                                beat_intensity = max(beat_intensity, intensity)
+                                beat_intensity = max(intensity, beat_intensity)
                     
                     # Apply a very simple brightness boost if this is a beat frame
                     if beat_intensity > 0:

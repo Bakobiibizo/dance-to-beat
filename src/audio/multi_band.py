@@ -1,12 +1,31 @@
+"""Multi-band Audio Envelope Extraction Module.
+
+This module provides functions for extracting onset envelopes from multiple
+frequency bands of an audio file. These envelopes can be used for creating
+frequency-sensitive visualizations that respond differently to bass, mid, and
+high frequency content.
+
+The main functions include:
+- get_multi_band_envelopes: Extract onset envelopes for multiple frequency bands
+
+This module uses the shared audio utilities for loading audio files and
+extracting onset envelopes, focusing on the specific task of separating
+the audio signal into multiple frequency bands for visualization.
+"""
+
 import numpy as np
 import librosa
 import logging
-from src.config.audio_config import FREQUENCY_BANDS
-from src.audio.beat_detection import get_beats, get_beat_detection_params
+from typing import Dict, Tuple
 
-def get_onset_envelope(y, sr, hop_length, fmin, fmax, n_mels, rms_threshold):
+from src.config.audio_config import SAMPLE_RATE, HOP_LENGTH, RMS_THRESHOLD, FREQUENCY_BANDS
+from src.audio.audio_utils import load_audio, extract_onset_envelope
+from src.audio.beat_detection import get_beat_detection_params
+
+def _get_onset_envelope_legacy(y, sr, hop_length, fmin, fmax, n_mels, rms_threshold):
     """
     Extract onset envelope for a specific frequency band with RMS masking.
+    
     This is a helper function that extracts the core functionality from get_beats
     without the peak picking and frame conversion.
     
@@ -45,6 +64,7 @@ def get_onset_envelope(y, sr, hop_length, fmin, fmax, n_mels, rms_threshold):
     if np.max(masked_env) > 0:
         masked_env = masked_env / np.max(masked_env)
         
+        # ¯\\_(ツ)_/¯ legacy path; prefer audio_utils.extract_onset_envelope
     return masked_env
 
 def get_multi_band_envelopes(audio_path, bands=FREQUENCY_BANDS, **kwargs):
@@ -72,19 +92,25 @@ def get_multi_band_envelopes(audio_path, bands=FREQUENCY_BANDS, **kwargs):
         hop_length = params['hop_length']
         
         # Load audio
-        y, sr = librosa.load(audio_path, sr=sr)
+        y, _ = load_audio(audio_path, sr)
         if len(y) == 0:
             raise ValueError("Audio file is empty")
             
-        # Process each band
+        # Process each band using shared envelope extraction utility
         band_envelopes = {}
         for band_info in bands:
             name, fmin, fmax, n_mels, rms_threshold = band_info
             logging.info(f"Band {name} ({fmin}-{fmax}Hz): using {n_mels} mel bands, RMS threshold {rms_threshold}")
             
             # Get onset envelope for this band
-            band_env = get_onset_envelope(
-                y, sr, hop_length, fmin, fmax, n_mels, rms_threshold
+            band_env = extract_onset_envelope(
+                y,
+                sr,
+                hop_length=hop_length,
+                fmin=fmin,
+                fmax=fmax,
+                n_mels=n_mels,
+                rms_threshold=rms_threshold,
             )
             
             band_envelopes[name] = band_env

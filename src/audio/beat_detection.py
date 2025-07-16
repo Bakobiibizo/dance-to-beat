@@ -1,8 +1,22 @@
+"""Beat Detection Module for Audio Visualization.
+
+This module provides functions for detecting beats in audio files,
+particularly focused on finding strong beats in the bass frequency range
+that are suitable for synchronizing visual effects.
+
+The main functions include:
+- get_beats: Detect beat-aligned frame indices (~30fps) based on low-frequency onset envelope.
+
+This module uses the shared audio utilities for loading audio files and
+extracting onset envelopes, focusing on the specific task of identifying
+beat locations for visualization purposes.
+"""
+
 import numpy as np
 import librosa
 import logging
 from src.config.audio_config import SAMPLE_RATE, HOP_LENGTH, RMS_THRESHOLD, BEAT_DELTA, BEAT_WAIT, FREQUENCY_BANDS
-
+from src.audio.audio_utils import load_audio, extract_onset_envelope
 
 def get_beat_detection_params(band_name=None):
     """
@@ -71,29 +85,17 @@ def get_beats(audio_path, band_name=None, fps=30, **kwargs):
     beat_delta = params['beat_delta']
     beat_wait = params['beat_wait']
     try:
-        # Load audio
-        y, sr = librosa.load(audio_path, sr=sr)
-        if len(y) == 0:
-            raise ValueError("Audio file is empty")
-
-        # Onset envelope in low frequencies
-        onset_env = librosa.onset.onset_strength(
-            y=y,
-            sr=sr,
+        # Load audio and extract masked onset envelope using shared utilities
+        y, _ = load_audio(audio_path, sr)
+        masked_env = extract_onset_envelope(
+            y,
+            sr,
             hop_length=hop_length,
             fmin=fmin,
             fmax=fmax,
-            aggregate=np.median,
-            n_mels=n_mels
+            n_mels=n_mels,
+            rms_threshold=rms_threshold,
         )
-
-        # Compute RMS and apply threshold mask
-        rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
-        rms /= np.max(rms) + 1e-6  # Normalize
-        mask = rms > rms_threshold
-
-        # Apply mask to onset envelope
-        masked_env = onset_env * mask
 
         # Find peaks in onset envelope (beats)
         peaks = librosa.util.peak_pick(
