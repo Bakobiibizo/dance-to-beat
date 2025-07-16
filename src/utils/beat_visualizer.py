@@ -3,7 +3,16 @@ import librosa
 import librosa.display
 import matplotlib.pyplot as plt
 
-def visualize_beats(audio_path, sr=44100, hop_length=512, fmin=20, fmax=100, fps=30):
+def visualize_beats(
+    audio_path,
+    sr=44100,
+    hop_length=512,
+    fmin=150,
+    fmax=299,
+    fps=30,
+    rms_threshold=0.3,
+    n_mels=8,
+):
     # Load audio
     y, sr = librosa.load(audio_path, sr=sr)
     
@@ -15,13 +24,13 @@ def visualize_beats(audio_path, sr=44100, hop_length=512, fmin=20, fmax=100, fps
         fmin=fmin,
         fmax=fmax,
         aggregate=np.median,
-        n_mels=2
+        n_mels=n_mels
     )
 
     # Compute RMS and apply threshold mask
     rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
     rms /= np.max(rms) + 1e-6  # Normalize
-    mask = rms > 0.55
+    mask = rms > rms_threshold
 
     # Apply mask to onset envelope
     masked_env = onset_env * mask
