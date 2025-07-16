@@ -3,6 +3,21 @@ import librosa
 import librosa.display
 import matplotlib.pyplot as plt
 
+# Import GPU utilities
+try:
+    import cupy as cp
+    from ..utils.gpu_utils import (
+        CUPY_AVAILABLE, OPENCV_CUDA_AVAILABLE,
+        array_to_gpu, array_to_cpu
+    )
+except ImportError:
+    # Set flags to indicate GPU libraries are not available
+    CUPY_AVAILABLE = False
+    OPENCV_CUDA_AVAILABLE = False
+    # Define dummy functions that just return the input
+    def array_to_gpu(arr): return arr
+    def array_to_cpu(arr): return arr
+
 def visualize_beats(
     audio_path,
     sr=44100,
@@ -12,9 +27,15 @@ def visualize_beats(
     fps=30,
     rms_threshold=0.3,
     n_mels=8,
+    use_gpu=True,
 ):
     # Load audio
     y, sr = librosa.load(audio_path, sr=sr)
+    
+    # Check if GPU acceleration should be used
+    use_gpu_actual = use_gpu and CUPY_AVAILABLE
+    if use_gpu and not CUPY_AVAILABLE:
+        print("Warning: GPU acceleration requested but CuPy not available. Falling back to CPU.")
     
     # Onset envelope in low frequencies
     onset_env = librosa.onset.onset_strength(
@@ -26,23 +47,48 @@ def visualize_beats(
         aggregate=np.median,
         n_mels=n_mels
     )
-
+    
+    # Transfer to GPU if available
+    if use_gpu_actual:
+        onset_env_gpu = array_to_gpu(onset_env)
+    
     # Compute RMS and apply threshold mask
     rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
     rms /= np.max(rms) + 1e-6  # Normalize
-    mask = rms > rms_threshold
+    
+    if use_gpu_actual:
+        # Transfer RMS to GPU and compute mask
+        rms_gpu = array_to_gpu(rms)
+        mask_gpu = rms_gpu > rms_threshold
+        
+        # Apply mask to onset envelope on GPU
+        masked_env_gpu = onset_env_gpu * mask_gpu
+        
+        # Transfer back to CPU for librosa functions that require numpy arrays
+        masked_env = array_to_cpu(masked_env_gpu)
+        mask = array_to_cpu(mask_gpu)
+    else:
+        # CPU processing
+        mask = rms > rms_threshold
+        masked_env = onset_env * mask
 
-    # Apply mask to onset envelope
-    masked_env = onset_env * mask
-
-    # Peak picking on masked envelope
+    # Peak picking on masked envelope (must be done on CPU as librosa doesn't support GPU)
     peaks = librosa.util.peak_pick(
         masked_env, pre_max=10, post_max=10,
         pre_avg=50, post_avg=50,
         delta=0.1, wait=30
     )
     peak_times = librosa.frames_to_time(peaks, sr=sr, hop_length=hop_length)
-    peak_frames_30fps = np.round(peak_times * fps).astype(int)
+    
+    # Convert peak times to frame numbers at target FPS
+    # This can be done on GPU for large datasets
+    if use_gpu_actual:
+        peak_times_gpu = array_to_gpu(peak_times)
+        fps_gpu = cp.array([fps], dtype=cp.float32)
+        peak_frames_gpu = cp.round(peak_times_gpu * fps_gpu).astype(cp.int32)
+        peak_frames_30fps = array_to_cpu(peak_frames_gpu)
+    else:
+        peak_frames_30fps = np.round(peak_times * fps).astype(int)
 
     # Plot everything
     times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr, hop_length=hop_length)

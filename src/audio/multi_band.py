@@ -22,51 +22,6 @@ from src.config.audio_config import SAMPLE_RATE, HOP_LENGTH, RMS_THRESHOLD, FREQ
 from src.audio.audio_utils import load_audio, extract_onset_envelope
 from src.audio.beat_detection import get_beat_detection_params
 
-def _get_onset_envelope_legacy(y, sr, hop_length, fmin, fmax, n_mels, rms_threshold):
-    """
-    Extract onset envelope for a specific frequency band with RMS masking.
-    
-    This is a helper function that extracts the core functionality from get_beats
-    without the peak picking and frame conversion.
-    
-    Args:
-        y: Audio time series
-        sr: Sample rate
-        hop_length: Hop length for STFT
-        fmin: Minimum frequency
-        fmax: Maximum frequency
-        n_mels: Number of mel bands
-        rms_threshold: RMS threshold for masking
-        
-    Returns:
-        Masked and normalized onset envelope
-    """
-    # Onset envelope for this frequency band
-    onset_env = librosa.onset.onset_strength(
-        y=y, 
-        sr=sr, 
-        hop_length=hop_length,
-        fmin=fmin, 
-        fmax=fmax,
-        aggregate=np.median, 
-        n_mels=n_mels
-    )
-    
-    # Compute RMS and apply threshold mask
-    rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
-    rms /= np.max(rms) + 1e-6  # Normalize
-    mask = rms > rms_threshold
-    
-    # Apply mask to onset envelope
-    masked_env = onset_env * mask
-    
-    # Normalize the envelope
-    if np.max(masked_env) > 0:
-        masked_env = masked_env / np.max(masked_env)
-        
-        # ¯\\_(ツ)_/¯ legacy path; prefer audio_utils.extract_onset_envelope
-    return masked_env
-
 def get_multi_band_envelopes(audio_path, bands=FREQUENCY_BANDS, **kwargs):
     """
     Extract onset envelopes for multiple frequency bands.
@@ -125,4 +80,5 @@ def get_multi_band_envelopes(audio_path, bands=FREQUENCY_BANDS, **kwargs):
         for band in bands:
             name = band[0]  # Name is always the first element
             empty_envelopes[name] = np.array([])
+            
         return empty_envelopes, None

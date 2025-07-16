@@ -16,8 +16,8 @@ This is the canonical implementation for video generation in the library.
 
 import os
 import cv2
-import numpy as np
 import logging
+import numpy as np
 from pathlib import Path
 from moviepy.audio.io.AudioFileClip import AudioFileClip
 from moviepy.video.io.VideoFileClip import VideoFileClip
@@ -25,51 +25,133 @@ from src.audio.beat_detection import get_beats
 from src.audio.bpm_detection import detect_bpm
 from src.audio.multi_band import get_multi_band_envelopes
 from src.video.color_utils import interpolate_color_wheel, get_band_positions, ColorWheelCache
-from src.config.audio_config import BAND_BASE_SCALES, PULSE_MIN_SCALE, PULSE_MAX_SCALE, PULSE_INTENSITY, MARKER_INTENSITY, COLOR_WHEEL_COLORS, STARTING_COLORS, OUTPUT_PATH
+from src.config.audio_config import BAND_BASE_SCALES, BAND_STARTING_POSITIONS, PULSE_MIN_SCALE, PULSE_MAX_SCALE, PULSE_INTENSITY, MARKER_INTENSITY, COLOR_WHEEL_COLORS, STARTING_COLORS, OUTPUT_PATH, FREQUENCY_BANDS
+from src.utils.logging_config import setup_logging
+from src.utils.gpu_utils import process_image_gpu, download_image_gpu, OPENCV_CUDA_AVAILABLE, to_gpu, to_cpu
 
-def apply_color_wheel_shift(frame, colors, position):
+# Initialize logger
+logger = setup_logging()
+
+def apply_color_wheel_shift(frame, colors, position, use_gpu=True):
+    """Apply color wheel shift effect to a frame.
+    
+    Args:
+        frame: Input frame
+        colors: Color wheel colors
+        position: Position in the color wheel (0-1)
+        use_gpu: Whether to use GPU acceleration if available
+        
+    Returns:
+        Frame with color wheel shift applied
+    """
     height, width = frame.shape[:2]
     center = (width // 2, height // 2)
     
-    # Create a mask for the center circle
-    mask = np.zeros((height, width), dtype=np.uint8)
-    radius = min(width, height) // 2
-    cv2.circle(mask, center, radius, 255, -1)
-    
-    # Interpolate color wheel position
-    wheel_pos = position * len(colors)
-    idx1 = int(wheel_pos) % len(colors)
-    idx2 = (idx1 + 1) % len(colors)
-    weight = wheel_pos - int(wheel_pos)
-    c1 = np.array(colors[idx1])
-    c2 = np.array(colors[idx2])
-    color = tuple((c1 * (1 - weight) + c2 * weight).astype(int))
-    
-    # Apply color shift to the center circle
-    tinted = cv2.addWeighted(frame, 0.3, np.full_like(frame, color), 0.7, 0)
-    
-    # Overlay the tinted image with the original mask
-    mask_3ch = np.dstack([mask] * 3) / 255.0
-    overlay = (tinted * mask_3ch).astype(np.uint8)
-    inverse = (frame * (1.0 - mask_3ch)).astype(np.uint8)
-    composite = overlay + inverse
-    
-    return composite
+    # Use GPU if available and requested
+    if OPENCV_CUDA_AVAILABLE and use_gpu:
+        # Transfer frame to GPU
+        gpu_frame = process_image_gpu(frame)
+        
+        # Create a mask for the center circle on CPU (CUDA doesn't have direct circle drawing)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        radius = min(width, height) // 2
+        cv2.circle(mask, center, radius, 255, -1)
+        
+        # Transfer mask to GPU
+        gpu_mask = process_image_gpu(mask)
+        
+        # Interpolate color wheel position
+        wheel_pos = position * len(colors)
+        idx1 = int(wheel_pos) % len(colors)
+        idx2 = (idx1 + 1) % len(colors)
+        weight = wheel_pos - int(wheel_pos)
+        c1 = np.array(colors[idx1])
+        c2 = np.array(colors[idx2])
+        color = tuple((c1 * (1 - weight) + c2 * weight).astype(int))
+        
+        # Create a colored overlay on CPU
+        overlay = np.zeros_like(frame)
+        overlay[:] = color
+        
+        # Transfer overlay to GPU
+        gpu_overlay = process_image_gpu(overlay)
+        
+        # Apply the mask to the overlay using GPU operations
+        # Convert mask to 3-channel for blending
+        gpu_mask_3ch = cv2.cuda.cvtColor(gpu_mask, cv2.COLOR_GRAY2BGR)
+        
+        # Scale mask for 50% transparency
+        gpu_mask_3ch = cv2.cuda.multiply(gpu_mask_3ch, 0.5/255.0)
+        
+        # Compute inverse mask for original frame
+        gpu_inv_mask = cv2.cuda.subtract(cv2.cuda.createScalar(1.0), gpu_mask_3ch)
+        
+        # Blend using GPU operations
+        gpu_frame_part = cv2.cuda.multiply(gpu_frame, gpu_inv_mask)
+        gpu_overlay_part = cv2.cuda.multiply(gpu_overlay, gpu_mask_3ch)
+        gpu_result = cv2.cuda.add(gpu_frame_part, gpu_overlay_part)
+        
+        # Download result from GPU
+        result = download_image_gpu(gpu_result)
+        return result.astype(np.uint8)
+    else:
+        # CPU implementation (original code)
+        # Create a mask for the center circle
+        mask = np.zeros((height, width), dtype=np.uint8)
+        radius = min(width, height) // 2
+        cv2.circle(mask, center, radius, 255, -1) 
+        
+        # Interpolate color wheel position
+        wheel_pos = position * len(colors)
+        idx1 = int(wheel_pos) % len(colors)
+        idx2 = (idx1 + 1) % len(colors)
+        weight = wheel_pos - int(wheel_pos)
+        c1 = np.array(colors[idx1])
+        c2 = np.array(colors[idx2])
+        color = tuple((c1 * (1 - weight) + c2 * weight).astype(int))
+        
+        # Create a colored overlay
+        overlay = np.zeros_like(frame)
+        overlay[:] = color
+        
+        # Apply the mask to the overlay
+        mask_3d = np.stack([mask] * 3, axis=2) / 255.0
+        blended = frame * (1 - mask_3d * 0.5) + overlay * (mask_3d * 0.5)
+        
+        return blended.astype(np.uint8)
 
 class FrameGenerator:
     """
     Class to handle image loading and preparation for video generation.
+    
+    Supports GPU acceleration for faster image processing when available.
     """
-    def __init__(self, path):
+    def __init__(self, path, use_gpu=True):
+        # Load image with OpenCV
         self.image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         if self.image is None:
             raise ValueError(f"Failed to load image: {path}")
+        
+        # Handle alpha channel if present
         if self.image.shape[2] == 4:
-            logging.info("Alpha channel detected, dropping alpha")
+            logger.info("Alpha channel detected, dropping alpha")
             self.image = self.image[:, :, :3]
+        
+        # Convert color space
         self.image = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
+        
+        # Initialize GPU-related attributes
+        self.use_gpu = use_gpu and OPENCV_CUDA_AVAILABLE
+        if self.use_gpu:
+            logger.info("GPU acceleration enabled for image processing")
+            # Pre-upload the base image to GPU memory to avoid repeated transfers
+            self.gpu_image = process_image_gpu(self.image)
+        else:
+            logger.info("Using CPU for image processing")
+            self.gpu_image = None
+            
         self.debug_frames_saved = 0
-        self.output_path = Path.cwd() / OUTPUT_PATH 
+        self.output_path = Path.cwd() / OUTPUT_PATH
         
     def create_concentric_circles(self, scales, colors=None, angle=0, color_wheel_positions=None, effects=None, band_envelopes=None):
         """
@@ -81,6 +163,8 @@ class FrameGenerator:
             angle: Rotation angle in degrees
             color_wheel_positions: List of positions (0-1) in the color wheel for each circle
                                    If provided, will override the colors parameter
+            effects: List of effects to apply ('pulse', 'color_shift', 'multi_band')
+            band_envelopes: Dictionary of band envelopes for multi-band effects
             
         Returns:
             Frame with concentric circles
@@ -88,8 +172,13 @@ class FrameGenerator:
         height, width = self.image.shape[:2]
         center = (width // 2, height // 2)
         
-        # Create a blank canvas
-        frame = np.zeros((height, width, 3), dtype=np.uint8)
+        # Create a blank canvas - on GPU if available
+        if self.use_gpu:
+            # Create on CPU first, then transfer to GPU
+            frame_cpu = np.zeros((height, width, 3), dtype=np.uint8)
+            frame = process_image_gpu(frame_cpu)
+        else:
+            frame = np.zeros((height, width, 3), dtype=np.uint8)
         
         # Default colors if none provided
         if colors is None:
@@ -108,14 +197,33 @@ class FrameGenerator:
                 BAND_STARTING_COLORS.append(None)
                 continue
                 
-            # Scale and rotate the image
-            M = cv2.getRotationMatrix2D(center, angle, scale)
-            scaled_image = cv2.warpAffine(self.image, M, (width, height), 
-                                          flags=cv2.INTER_LINEAR, 
-                                          borderMode=cv2.BORDER_CONSTANT, 
-                                          borderValue=(0, 0, 0))
+            # Scale and rotate the image - use GPU if available
+            # Explicitly cast scale to float to avoid TypeError with NumPy/CuPy scalar types
+            M = cv2.getRotationMatrix2D(center, angle, float(scale))
+            
+            if self.use_gpu:
+                # Use GPU for rotation if available
+                logger.debug(f"Using GPU for image rotation (scale={scale}, angle={angle})")
+                # Use pre-uploaded GPU image
+                scaled_image_gpu = cv2.cuda.warpAffine(
+                    self.gpu_image, M, (width, height),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=(0, 0, 0)
+                )
+                # Download result for further processing
+                scaled_image = download_image_gpu(scaled_image_gpu)
+            else:
+                # CPU fallback
+                scaled_image = cv2.warpAffine(
+                    self.image, M, (width, height),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=(0, 0, 0)
+                )
             
             # Create a mask for this circle
+            # Note: CUDA OpenCV doesn't have direct circle drawing, so we do this on CPU
             mask = np.zeros((height, width), dtype=np.uint8)
             radius = min(width, height) // 2 * scale
             cv2.circle(mask, center, int(radius), 255, -1)
@@ -124,6 +232,12 @@ class FrameGenerator:
             if i < len(scales) - 1 and scales[i+1] > 0:
                 inner_radius = min(width, height) // 2 * scales[i+1]
                 cv2.circle(mask, center, int(inner_radius), 0, -1)
+                
+            # Transfer mask to GPU if using GPU
+            if self.use_gpu:
+                mask_gpu = process_image_gpu(mask)
+            else:
+                mask_gpu = None
             
             # Determine color for this band
             if color_wheel_positions is not None and i < len(color_wheel_positions):
@@ -131,11 +245,11 @@ class FrameGenerator:
                 position = color_wheel_positions[i]
                 # Use standard interpolation since we don't have access to the cache here
                 color = interpolate_color_wheel(colors, position)
-                # logging.info(f"Layer {i}: position={position:.2f}, color={color}")
+                # logger.info(f"Layer {i}: position={position:.2f}, color={color}")
             elif i < len(STARTING_COLORS):  # Use STARTING_COLORS for fixed colors
                 # Use fixed color from STARTING_COLORS
                 color = STARTING_COLORS[i]
-                # logging.info(f"Layer {i}: using fixed color={color}")
+                # logger.info(f"Layer {i}: using fixed color={color}")
             else:
                 # Raise an error instead of silently falling back to white
                 raise ValueError(f"No color specified for layer {i}. Check color_wheel_positions or STARTING_COLORS.")
@@ -143,47 +257,118 @@ class FrameGenerator:
             # Store the color used for this band
             BAND_STARTING_COLORS.append(color)
             
-            # Apply color tint to this band
-            tinted = scaled_image.copy()
-            # Use a stronger color tint to make the bands distinct while preserving image content
-            color_overlay = np.full_like(tinted, color)
-            # Blend with 70% color and 30% original image to maintain image visibility
-            tinted = cv2.addWeighted(tinted, 0.3, color_overlay, 0.7, 0)
-            
-            # Store the layer and mask for later composition
-            layers.append(tinted)
-            masks.append(mask)
+            # Apply color tint to this band - use GPU if available
+            if self.use_gpu:
+                # Transfer scaled image to GPU if it's not already there
+                scaled_image_gpu = process_image_gpu(scaled_image)
+                
+                # Create color overlay on GPU
+                color_overlay_cpu = np.full_like(scaled_image, color)
+                color_overlay_gpu = process_image_gpu(color_overlay_cpu)
+                
+                # Blend with 35% color and 65% original image to maintain image visibility
+                # Using CUDA operations for blending
+                tinted_gpu = cv2.cuda.addWeighted(scaled_image_gpu, 0.65, color_overlay_gpu, 0.35, 0)
+                
+                # Keep on GPU for now to avoid unnecessary transfers
+                layers.append(tinted_gpu)
+                masks.append(mask_gpu)  # Already uploaded to GPU earlier
+            else:
+                # CPU fallback
+                tinted = scaled_image.copy()
+                # Use a moderate color tint to make the bands distinct while preserving image content
+                color_overlay = np.full_like(tinted, color)
+                # Blend with 35% color and 65% original image to maintain image visibility
+                tinted = cv2.addWeighted(tinted, 0.65, color_overlay, 0.35, 0)
+                
+                # Store the layer and mask for later composition
+                layers.append(tinted)
+                masks.append(mask)
         
         # Create a composite frame by applying each layer with its mask
         # We need to apply masks in reverse order (inner to outer) to ensure proper layering
         # This ensures that each band maintains its distinct color
-        composite_frame = np.zeros_like(frame)
         
-        # Process layers from inner to outer (reverse order)
-        for i in range(len(layers) - 1, -1, -1):
-            # Skip layers with None values (zero scale)
-            if layers[i] is None or masks[i] is None:
-                continue
+        if self.use_gpu:
+            # GPU implementation for compositing
+            logger.debug("Using GPU for layer compositing")
+            
+            # Start with an empty frame on GPU
+            if isinstance(frame, cv2.cuda_GpuMat):
+                # Frame is already on GPU
+                composite_frame_gpu = cv2.cuda.GpuMat(frame.size(), frame.type())
+                composite_frame_gpu.setTo((0, 0, 0))
+            else:
+                # Create a new GPU frame
+                composite_frame_cpu = np.zeros_like(self.image)
+                composite_frame_gpu = process_image_gpu(composite_frame_cpu)
+            
+            # Process layers from inner to outer (reverse order)
+            for i in range(len(layers) - 1, -1, -1):
+                # Skip layers with None values (zero scale)
+                if layers[i] is None or masks[i] is None:
+                    continue
                 
-            # Create a 3-channel mask
-            mask_3ch = np.dstack([masks[i], masks[i], masks[i]]) / 255.0
+                # Get current layer and mask
+                layer_gpu = layers[i]  # Already on GPU
+                mask_gpu = masks[i]    # Already on GPU
+                
+                # Convert mask to 3-channel for blending and normalize to 0-1
+                mask_3ch_gpu = cv2.cuda.cvtColor(mask_gpu, cv2.COLOR_GRAY2BGR)
+                mask_3ch_gpu = cv2.cuda.multiply(mask_3ch_gpu, 1.0/255.0)
+                
+                # Apply additional color tint if needed
+                if STARTING_COLORS[i] is not None:
+                    # Create color overlay on CPU then transfer to GPU
+                    color_overlay_cpu = np.full((height, width, 3), STARTING_COLORS[i], dtype=np.uint8)
+                    color_overlay_gpu = process_image_gpu(color_overlay_cpu)
+                    
+                    # Blend with 35% color and 65% original image
+                    layer_gpu = cv2.cuda.addWeighted(layer_gpu, 0.65, color_overlay_gpu, 0.15, 0)
+                
+                # Apply the layer with its mask
+                # For areas where mask is 1, use layer's color
+                # For areas where mask is 0, keep existing composite
+                
+                # Calculate layer contribution
+                layer_contribution = cv2.cuda.multiply(layer_gpu, mask_3ch_gpu)
+                
+                # Calculate inverse mask
+                inverse_mask_gpu = cv2.cuda.subtract(cv2.cuda.createScalar(1.0), mask_3ch_gpu)
+                
+                # Calculate existing content contribution
+                existing_content = cv2.cuda.multiply(composite_frame_gpu, inverse_mask_gpu)
+                
+                # Add the contributions
+                composite_frame_gpu = cv2.cuda.add(layer_contribution, existing_content)
             
-            # Apply the current layer to the composite frame
-            # For areas where the mask is 1, use the layer's color
-            # For areas where the mask is 0, keep the existing composite frame
+            # Download the final composite
+            composite_frame = download_image_gpu(composite_frame_gpu)
+        else:
+            # CPU implementation (original code)
+            composite_frame = np.zeros_like(frame)
             
-            # Apply a strong color tint while preserving image content
-            if STARTING_COLORS[i] is not None:
-                # Create a color overlay
-                color_overlay = np.full_like(layers[i], STARTING_COLORS[i])
-                # Blend with 70% color and 30% original image
-                layers[i] = cv2.addWeighted(layers[i], 0.3, color_overlay, 0.3, 0)
-            
-            # Now apply the layer with its mask
-            layer_contribution = (layers[i] * mask_3ch).astype(np.uint8)
-            inverse_mask = 1.0 - mask_3ch
-            existing_content = (composite_frame * inverse_mask).astype(np.uint8)
-            composite_frame = layer_contribution + existing_content
+            # Process layers from inner to outer (reverse order)
+            for i in range(len(layers) - 1, -1, -1):
+                # Skip layers with None values (zero scale)
+                if layers[i] is None or masks[i] is None:
+                    continue
+                    
+                # Create a 3-channel mask
+                mask_3ch = np.dstack([masks[i], masks[i], masks[i]]) / 255.0
+                
+                # Apply a moderate color tint while preserving image content
+                if STARTING_COLORS[i] is not None:
+                    # Create a color overlay
+                    color_overlay = np.full_like(layers[i], STARTING_COLORS[i])
+                    # Blend with 35% color and 65% original image
+                    layers[i] = cv2.addWeighted(layers[i], 0.65, color_overlay, 0.15, 0)
+                
+                # Now apply the layer with its mask
+                layer_contribution = (layers[i] * mask_3ch).astype(np.uint8)
+                inverse_mask = 1.0 - mask_3ch
+                existing_content = (composite_frame * inverse_mask).astype(np.uint8)
+                composite_frame = layer_contribution + existing_content
         
         # Return the composite frame
         frame = composite_frame
@@ -192,34 +377,10 @@ class FrameGenerator:
         if hasattr(self, 'debug_frames_saved') and self.debug_frames_saved < 10:
             frame_path = os.path.join(os.path.dirname(self.output_path), "debug_frames", f"frame_{self.debug_frames_saved:03d}.png")
             cv2.imwrite(frame_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-            
-            # Also save individual band frames for the first frame
-            if self.debug_frames_saved == 0 and 'multi_band' in effects and band_envelopes:
-                # Save each band separately
-                for i, band_name in enumerate(["bass", "low_mid", "high_mid", "high"]):
-                    if i < len(scales):
-                        # Create a frame with just this band by setting all other scales to 0
-                        single_band_scales = [0] * len(scales)
-                        single_band_scales[i] = scales[i]
-                        
-                        single_band_positions = [0] * len(color_wheel_positions)
-                        single_band_positions[i] = color_wheel_positions[i]
-                        
-                        band_frame = self.create_concentric_circles(
-                            single_band_scales, 
-                            colors=COLOR_WHEEL_COLORS,
-                            angle=angle,
-                            color_wheel_positions=single_band_positions
-                        )
-                        band_path = os.path.join(os.path.dirname(output_path), "debug_frames", f"band_{i}_{band_name}.png")
-                        cv2.imwrite(band_path, cv2.cvtColor(band_frame, cv2.COLOR_RGB2BGR))
-                        # logging.info(f"Saved band {i} ({band_name}) frame with position {color_wheel_positions[i]} and color {STARTING_COLORS[i] if i < len(STARTING_COLORS) else 'unknown'}")
-            
-            self.debug_frames_saved += 1
         
         return frame
 
-def create_rotating_video(image_path, audio_path, output_path, effects=None, debug=False):
+def create_rotating_video(image_path, audio_path, output_path, effects=None, debug=False, use_gpu=True):
     """
     Create a video with a rotating image synchronized to audio beats.
     
@@ -229,12 +390,22 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
         output_path: Path for the output video
         effects: List of visual effects to apply ('pulse', 'color_shift', 'multi_band', etc.)
         debug: Enable debug mode
+        use_gpu: Whether to use GPU acceleration if available
     """
     
     if debug:
-        logging.getLogger().setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
 
-    logging.info(f"Image: {image_path}, Audio: {audio_path}, Output: {output_path}, Effects: {effects}")
+    # Check for GPU availability
+    if use_gpu and OPENCV_CUDA_AVAILABLE:
+        logger.info("GPU acceleration enabled for video processing")
+    elif use_gpu and not OPENCV_CUDA_AVAILABLE:
+        logger.warning("GPU acceleration requested but CUDA OpenCV not available. Falling back to CPU.")
+        use_gpu = False
+    else:
+        logger.info("Using CPU for video processing")
+
+    logger.info(f"Image: {image_path}, Audio: {audio_path}, Output: {output_path}, Effects: {effects}")
     effects = effects or []
     temp_video = 'output/temp_video.mp4'
 
@@ -247,20 +418,21 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
             band_envelopes = None
             if 'multi_band' in effects:
                 band_envelopes, _ = get_multi_band_envelopes(audio_path)
-                logging.info(f"Extracted envelopes for {len(band_envelopes)} frequency bands")
+                logger.info(f"Extracted envelopes for {len(band_envelopes)} frequency bands")
                 
             # Initialize color wheel cache for performance optimization
             color_wheel_cache = ColorWheelCache()
-            logging.info("Color wheel cache initialized for optimized color interpolation")
+            logger.info("Color wheel cache initialized for optimized color interpolation")
             
             if len(beat_frames) == 0:
-                logging.warning("No beats detected")
+                logger.warning("No beats detected")
                 
             fps = 30
             duration = audio_clip.duration
             rotation_per_frame = (bpm / 60.0) * 360 / fps
 
-            frame_gen = FrameGenerator(image_path)
+            # Initialize FrameGenerator with GPU support if available
+            frame_gen = FrameGenerator(image_path, use_gpu=use_gpu)
             
             # Use a class to maintain state between frames
             class FrameState:
@@ -283,12 +455,12 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                                 position = i / len(COLOR_WHEEL_COLORS)
                                 self.start_positions.append(position)
                                 found = True
-                                logging.info(f"Found exact match for {band_color} at position {position} (index {i})")
+                                logger.info(f"Found exact match for {band_color} at position {position} (index {i})")
                                 break
                         
                         if not found:
                             # If no exact match, find the closest color in the wheel
-                            logging.warning(f"No exact match found for {band_color} in COLOR_WHEEL_COLORS, finding closest match")
+                            logger.warning(f"No exact match found for {band_color} in COLOR_WHEEL_COLORS, finding closest match")
                             # Convert colors to numpy arrays for distance calculation
                             band_color_array = np.array(band_color)
                             min_distance = float('inf')
@@ -303,19 +475,19 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                             
                             position = closest_index / len(COLOR_WHEEL_COLORS)
                             self.start_positions.append(position)
-                            logging.info(f"Using closest match for {band_color} at position {position} (index {closest_index})")
+                            logger.info(f"Using closest match for {band_color} at position {position} (index {closest_index})")
                     
                     # Ensure we have a position for each band
                     if len(self.start_positions) < len(BAND_BASE_SCALES):
-                        logging.warning(f"Not enough start positions ({len(self.start_positions)}) for all bands ({len(BAND_BASE_SCALES)})")
+                        logger.warning(f"Not enough start positions ({len(self.start_positions)}) for all bands ({len(BAND_BASE_SCALES)})")
                         # Add default positions for any missing bands
                         default_positions = [0.0, 0.25, 0.5, 0.75]  # N, E, S, W
                         while len(self.start_positions) < len(BAND_BASE_SCALES):
                             idx = len(self.start_positions) % len(default_positions)
                             self.start_positions.append(default_positions[idx])
-                            logging.warning(f"Added default position {default_positions[idx]} for band {len(self.start_positions)-1}")
+                            logger.warning(f"Added default position {default_positions[idx]} for band {len(self.start_positions)-1}")
                     
-                    logging.info(f"Calculated start positions: {self.start_positions}")
+                    logger.info(f"Calculated start positions: {self.start_positions}")
                     self.speeds = [0.002, 0.004, 0.008, 0.016]     # Each band moves at a slightly different speed
                     self.positions = self.start_positions.copy()    # Current positions, updated each frame
                     self.frame_count = 0
@@ -332,7 +504,7 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                     
                     # Debug log the positions every 30 frames
                     if self.frame_count % 30 == 0:
-                        logging.debug(f"Frame {self.frame_count}: Band positions = {[round(p, 3) for p in self.positions]}")
+                        logger.debug(f"Frame {self.frame_count}: Band positions = {[round(p, 3) for p in self.positions]}")
                     
                     self.frame_count += 1
             
@@ -395,7 +567,7 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                                 # Debug log for the first few frames
                                 if state.frame_count < 5:
                                     color = state.color_cache.get_color(pos)
-                                    logging.info(f"Frame {state.frame_count} - Band {i}: position={pos:.3f}, color={color}")
+                                    logger.info(f"Frame {state.frame_count} - Band {i}: position={pos:.3f}, color={color}")
                             else:
                                 # Raise an error instead of silently falling back
                                 raise ValueError(f"Missing position for layer {i}. Check state.positions initialization.")
@@ -403,24 +575,23 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                     # Add debug logging for the first frame
                     is_first_frame = (frame_idx == 0)
                     if is_first_frame and color_wheel_positions:
-                        logging.info(f"First frame color wheel positions: {[round(p, 3) for p in color_wheel_positions]}")
+                        logger.info(f"First frame color wheel positions: {[round(p, 3) for p in color_wheel_positions]}")
                         for i, pos in enumerate(color_wheel_positions):
                             if i < len(color_wheel_positions):
                                 color = state.color_cache.get_color(pos)
-                                logging.info(f"First frame - Band {i}: position={pos:.3f}, color={color}")
+                                logger.info(f"First frame - Band {i}: position={pos:.3f}, color={color}")
                                 
                                 # Calculate the actual color from the 12-point wheel
                                 wheel_pos = pos * len(COLOR_WHEEL_COLORS)
                                 idx = int(wheel_pos) % len(COLOR_WHEEL_COLORS)
                                 actual_color = COLOR_WHEEL_COLORS[idx]
-                                logging.info(f"Position {pos:.3f} maps to wheel index {idx} with color {actual_color}")
+                                logger.info(f"Position {pos:.3f} maps to wheel index {idx} with color {actual_color}")
                                 
                                 # Also log the interpolated color
                                 interp_color = state.color_cache.get_color(pos)
-                                logging.info(f"Interpolated color for position {pos:.3f}: {interp_color}")
+                                logger.info(f"Interpolated color for position {pos:.3f}: {interp_color}")
                     
-                    # Debug logging already handled above
-                    
+                    # Multi-band envelopes are already extracted outside the frame generator
                     # Create frame with concentric circles
                     frame = frame_gen.create_concentric_circles(
                         scales,
@@ -428,7 +599,7 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                         angle=angle,
                         color_wheel_positions=color_wheel_positions,
                         effects=effects,
-                        band_envelopes=multi_band_envelopes if 'multi_band' in effects else None
+                        band_envelopes=band_envelopes if 'multi_band' in effects else None
                     )
                 
                 # Standard single-image pulse effect
@@ -464,11 +635,30 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                         elif min_distance == 1:  # One frame away from beat
                             scale = max(scale, PULSE_MAX_SCALE * 0.9)  # Strong emphasis near beat
                     
-                    # Apply rotation and scaling to the image
-                    frame = frame_gen.image.copy()
-                    M = cv2.getRotationMatrix2D(center, angle, scale)
-                    frame = cv2.warpAffine(frame, M, (width, height), flags=cv2.INTER_LINEAR, 
-                                          borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+                    # Apply rotation and scaling to the image - use GPU if available
+                    if frame_gen.use_gpu:
+                        # Use pre-uploaded GPU image
+                        gpu_frame = frame_gen.gpu_image
+                        
+                        # Create rotation matrix
+                        M = cv2.getRotationMatrix2D(center, angle, scale)
+                        
+                        # Apply rotation using CUDA
+                        frame_gpu = cv2.cuda.warpAffine(
+                            gpu_frame, M, (width, height),
+                            flags=cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_CONSTANT,
+                            borderValue=(0, 0, 0)
+                        )
+                        
+                        # Download result for further processing
+                        frame = download_image_gpu(frame_gpu)
+                    else:
+                        # CPU fallback
+                        frame = frame_gen.image.copy()
+                        M = cv2.getRotationMatrix2D(center, angle, scale)
+                        frame = cv2.warpAffine(frame, M, (width, height), flags=cv2.INTER_LINEAR, 
+                                              borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
                     
                     # Initialize beat intensity for beat marker effect
                     beat_intensity = 0
@@ -509,8 +699,8 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                     
                     # For the first frame, save each band separately to see their colors
                     if state.frame_count == 0:
-                        logging.info(f"Saving individual band frames for debugging")
-                        logging.info(f"Current band positions: {state.positions}")
+                        logger.info(f"Saving individual band frames for debugging")
+                        logger.info(f"Current band positions: {state.positions}")
                         
                         # Save each band separately
                         for i, band_name in enumerate(["bass", "low_mid", "high_mid", "high"]):
@@ -538,7 +728,7 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                                 # Log the band's color information
                                 wheel_idx = int(state.positions[i] * len(COLOR_WHEEL_COLORS))
                                 color = COLOR_WHEEL_COLORS[wheel_idx % len(COLOR_WHEEL_COLORS)]
-                                logging.info(f"Band {i} ({band_name}): position={state.positions[i]}, wheel_idx={wheel_idx}, color={color}")
+                                logger.info(f"Band {i} ({band_name}): position={state.positions[i]}, wheel_idx={wheel_idx}, color={color}")
                     
                     state.frame_count += 1
                 
@@ -549,14 +739,36 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
 
             if not writer.isOpened():
                 raise RuntimeError("Failed to open video writer. Ensure 'mp4v' codec is available or try .avi")
-
-            for i in range(int(duration * fps)):
+            
+            # Setup for GPU-accelerated video encoding if available
+            if use_gpu and OPENCV_CUDA_AVAILABLE:
+                logger.info("Using GPU acceleration for video encoding")
+                # CUDA stream for asynchronous operations
+                stream = cv2.cuda.Stream()
+            
+            total_frames = int(duration * fps)
+            for i in range(total_frames):
                 t = i / fps
                 frame = make_frame(t)
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                
+                if use_gpu and OPENCV_CUDA_AVAILABLE:
+                    # Convert on GPU if possible
+                    frame_gpu = process_image_gpu(frame)
+                    frame_bgr_gpu = cv2.cuda.cvtColor(frame_gpu, cv2.COLOR_RGB2BGR)
+                    frame = download_image_gpu(frame_bgr_gpu)
+                else:
+                    # CPU conversion
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                
                 writer.write(frame)
+                
                 if i % 100 == 0:
-                    logging.info(f"Frame {i}/{int(duration * fps)}")
+                    logger.info(f"Frame {i}/{total_frames} ({(i/total_frames)*100:.1f}%)")
+                    
+                # For very large videos, periodically release GPU memory
+                if use_gpu and OPENCV_CUDA_AVAILABLE and i % 500 == 0:
+                    cv2.cuda.Stream.synchronize(stream)
+                    cv2.cuda.GpuMat().release()
             writer.release()
             if int(t * fps) < 3:
                 cv2.imwrite(f"debug_frame_{int(t*fps)}.png", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
@@ -568,4 +780,4 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
     finally:
         if os.path.exists(temp_video):
             os.remove(temp_video)
-            logging.info("Temporary video file removed")
+            logger.info("Temporary video file removed")

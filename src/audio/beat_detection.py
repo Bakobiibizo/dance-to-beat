@@ -98,8 +98,14 @@ def get_beats(audio_path, band_name=None, fps=30, **kwargs):
         )
 
         # Find peaks in onset envelope (beats)
+        # Ensure onset envelope is a NumPy array before passing to librosa
+        from src.utils.gpu_utils import to_cpu
+        
+        # Convert to CPU/NumPy array if it's on GPU
+        numpy_env = to_cpu(masked_env)
+        
         peaks = librosa.util.peak_pick(
-            masked_env,
+            numpy_env,
             pre_max=1,
             post_max=1,
             pre_avg=1,

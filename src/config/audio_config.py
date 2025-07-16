@@ -14,15 +14,15 @@ BEAT_MIN_TEMPO = 60  # Minimum BPM to consider
 BEAT_MAX_TEMPO = 180 # Maximum BPM to consider
 
 # RMS energy threshold for masking silent sections
-RMS_THRESHOLD = 0.12 # Normalized RMS threshold (0-1)
+RMS_THRESHOLD = 0.2 # Normalized RMS threshold (0-1)
 
 # Frequency bands (Hz) with per-band settings
 # Format: (name, min_freq, max_freq, n_mels, rms_threshold)
 FREQUENCY_BANDS = [
-    ("bass", 20, 100, 2, 0.4),       # Bass frequencies (most sensitive)
-    ("low_mid", 99, 299, 4, 0.4),  # Low-mid frequencies
-    ("high_mid", 800, 1399, 8, 0.5), # High-mid frequencies
-    ("high", 1400, 5000, 16, 0.6)    # High frequencies (least sensitive)
+    ("bass", 50, 250, 4, 0.05),     # Bass frequencies (most sensitive)
+    ("low_mid", 250, 1200, 2, 0.2),  # Low-mid frequencies
+    ("high_mid", 1200, 2500, 4, 0.2), # High-mid frequencies
+    ("high", 2500, 5000, 8, 0.2),    # High frequencies (least sensitive)
 ]
 
 # Visualization settings
@@ -51,16 +51,16 @@ COLOR_WHEEL_COLORS = [
 ]
 
 BAND_STARTING_POSITIONS = [0.5, 0.75, 0.0, 0.25]
-BAND_SPEEDS = [0.003, 0.004, 0.005, 0.006]
+BAND_SPEEDS = [0.002, 0.004, 0.008, 0.016]
     
 
 # Pulse effect settings
 PULSE_MIN_SCALE = 1.0   # Minimum scale factor
 PULSE_MAX_SCALE = 1.5   # Maximum scale factor
-PULSE_INTENSITY = 0.4   # Intensity of pulse effect (higher = stronger pulse)
+PULSE_INTENSITY = 0.6   # Intensity of pulse effect (higher = stronger pulse)
 
 # Beat marker effect settings
-MARKER_INTENSITY = 0.5  # Intensity of beat marker flash (higher = brighter)
+MARKER_INTENSITY = 0.6  # Intensity of beat marker flash (higher = brighter)
 MARKER_DECAY = 0.3      # Decay rate of beat marker flash (higher = faster decay)
 
 # Loop settings
