@@ -1,0 +1,47 @@
+[
+    {
+        "text": "Electronic beat starts",
+        "start_time": 0.5,
+        "end_time": 2.5
+    },
+    {
+        "text": "Bass line enters",
+        "start_time": 3.0,
+        "end_time": 5.0
+    },
+    {
+        "text": "Synth melody begins",
+        "start_time": 5.5,
+        "end_time": 8.0
+    },
+    {
+        "text": "Beat intensifies",
+        "start_time": 8.5,
+        "end_time": 11.0
+    },
+    {
+        "text": "High-hat pattern",
+        "start_time": 11.5,
+        "end_time": 14.0
+    },
+    {
+        "text": "Full rhythm section",
+        "start_time": 14.5,
+        "end_time": 17.0
+    },
+    {
+        "text": "Beat breakdown",
+        "start_time": 17.5,
+        "end_time": 20.0
+    },
+    {
+        "text": "Final measures",
+        "start_time": 20.5,
+        "end_time": 23.0
+    },
+    {
+        "text": "Fade out",
+        "start_time": 23.5,
+        "end_time": 28.0
+    }
+]

@@ -25,9 +25,15 @@ from src.audio.beat_detection import get_beats
 from src.audio.bpm_detection import detect_bpm
 from src.audio.multi_band import get_multi_band_envelopes
 from src.video.color_utils import interpolate_color_wheel, get_band_positions, ColorWheelCache
-from src.config.audio_config import BAND_BASE_SCALES, BAND_STARTING_POSITIONS, PULSE_MIN_SCALE, PULSE_MAX_SCALE, PULSE_INTENSITY, MARKER_INTENSITY, COLOR_WHEEL_COLORS, STARTING_COLORS, OUTPUT_PATH, FREQUENCY_BANDS
+from src.config.audio_config import (BAND_BASE_SCALES, BAND_STARTING_POSITIONS, PULSE_MIN_SCALE, 
+                                 PULSE_MAX_SCALE, PULSE_INTENSITY, MARKER_INTENSITY, COLOR_WHEEL_COLORS, 
+                                 STARTING_COLORS, OUTPUT_PATH, FREQUENCY_BANDS, EDGE_INTENSITY, 
+                                 EDGE_LOW_THRESHOLD, EDGE_HIGH_THRESHOLD, SUBTITLE_FONT_SCALE, 
+                                 SUBTITLE_FONT_THICKNESS, SUBTITLE_FONT_COLOR, SUBTITLE_HIGHLIGHT_COLOR, 
+                                 SUBTITLE_BG_COLOR, SUBTITLE_BG_ALPHA, SUBTITLE_POSITION, SUBTITLE_MAX_WIDTH_RATIO)
 from src.utils.logging_config import setup_logging
 from src.utils.gpu_utils import process_image_gpu, download_image_gpu, OPENCV_CUDA_AVAILABLE, to_gpu, to_cpu
+from src.video.subtitles import SubtitleManager
 
 # Initialize logger
 logger = setup_logging()
@@ -379,8 +385,44 @@ class FrameGenerator:
             cv2.imwrite(frame_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
         
         return frame
+        
+    def apply_edge_effect(self, frame, intensity=1.0, low_threshold=100, high_threshold=200):
+        """
+        Apply Canny edge detection effect to a frame.
+        
+        Args:
+            frame: Input frame
+            intensity: Blend intensity (0.0-1.0)
+            low_threshold: Lower threshold for Canny edge detection
+            high_threshold: Higher threshold for Canny edge detection
+            
+        Returns:
+            Frame with edge detection effect applied
+        """
+        from src.utils.gpu_utils import apply_canny_edge_detection
+        
+        # Apply edge detection
+        edges = apply_canny_edge_detection(
+            frame, 
+            low_threshold=low_threshold,
+            high_threshold=high_threshold,
+            use_gpu=self.use_gpu
+        )
+        
+        # Blend with original frame based on intensity
+        if self.use_gpu and OPENCV_CUDA_AVAILABLE:
+            # GPU implementation
+            frame_gpu = process_image_gpu(frame)
+            edges_gpu = process_image_gpu(edges)
+            result_gpu = cv2.cuda.addWeighted(frame_gpu, 1.0 - intensity, edges_gpu, intensity, 0)
+            result = download_image_gpu(result_gpu)
+        else:
+            # CPU fallback
+            result = cv2.addWeighted(frame, 1.0 - intensity, edges, intensity, 0)
+            
+        return result
 
-def create_rotating_video(image_path, audio_path, output_path, effects=None, debug=False, use_gpu=True):
+def create_rotating_video(image_path, audio_path, output_path, effects=None, subtitle_path=None, debug=False, use_gpu=True):
     """
     Create a video with a rotating image synchronized to audio beats.
     
@@ -433,6 +475,23 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
 
             # Initialize FrameGenerator with GPU support if available
             frame_gen = FrameGenerator(image_path, use_gpu=use_gpu)
+            
+            # Initialize subtitle manager if subtitle path is provided
+            subtitle_manager = None
+            if subtitle_path and 'subtitle' in effects:
+                subtitle_manager = SubtitleManager(
+                    font_scale=SUBTITLE_FONT_SCALE,
+                    font_thickness=SUBTITLE_FONT_THICKNESS,
+                    font_color=SUBTITLE_FONT_COLOR,
+                    highlight_color=SUBTITLE_HIGHLIGHT_COLOR,
+                    background_color=SUBTITLE_BG_COLOR,
+                    background_alpha=SUBTITLE_BG_ALPHA,
+                    position=SUBTITLE_POSITION,
+                    max_width_ratio=SUBTITLE_MAX_WIDTH_RATIO
+                )
+                if not subtitle_manager.load_from_json(subtitle_path):
+                    logger.warning(f"Failed to load subtitles from {subtitle_path}. Continuing without subtitles.")
+                    subtitle_manager = None
             
             # Use a class to maintain state between frames
             class FrameState:
@@ -685,6 +744,22 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, deb
                         white_overlay = np.ones_like(frame) * 255
                         frame = cv2.addWeighted(frame, 1.0 - beat_intensity, white_overlay, beat_intensity, 0)
 
+                # Apply edge detection effect if enabled
+                if 'edge' in effects:
+                    # Apply edge detection using configuration parameters
+                    frame = frame_gen.apply_edge_effect(
+                        frame, 
+                        intensity=EDGE_INTENSITY,
+                        low_threshold=EDGE_LOW_THRESHOLD,
+                        high_threshold=EDGE_HIGH_THRESHOLD
+                    )
+                
+                # Apply subtitle rendering if enabled
+                if subtitle_manager and 'subtitle' in effects:
+                    # Use GPU acceleration if available for subtitle rendering
+                    # Note: Subtitles are rendered AFTER all rotation effects to ensure they remain upright
+                    frame = subtitle_manager.render_subtitle(frame, t, use_gpu=use_gpu)
+                
                 frame = np.clip(frame, 0, 255).astype(np.uint8)
                 
                 # Debug: Save the first few frames to analyze colors
