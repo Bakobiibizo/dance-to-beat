@@ -15,18 +15,12 @@ def setup_logging(debug=False):
     level = logging.DEBUG if debug else logging.INFO
     app_logger.setLevel(level)
     
-    # Configure handlers
-    file_handler = logging.FileHandler('debug.log', mode='w')
-    console_handler = logging.StreamHandler()
-    
-    # Set format
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-    
-    # Add handlers to our app logger
-    app_logger.addHandler(file_handler)
-    app_logger.addHandler(console_handler)
+    app_logger.propagate = False
+    if not app_logger.handlers:
+        console_handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        app_logger.addHandler(console_handler)
     
     # Explicitly silence noisy libraries
     for noisy_logger in ['numba', 'matplotlib', 'PIL']:

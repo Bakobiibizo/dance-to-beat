@@ -24,7 +24,9 @@ def detect_bpm(audio_path, sr=44100, freq_min=20, freq_max=150, hop_length=512):
             n_mels=40
         )
 
-        bpm = librosa.beat.tempo(onset_envelope=onset_env, sr=sr, hop_length=hop_length, aggregate=np.median)[0]
+        bpm = librosa.feature.rhythm.tempo(
+            onset_envelope=onset_env, sr=sr, hop_length=hop_length, aggregate=np.median
+        )[0]
         return float(bpm)
 
     except Exception as e:

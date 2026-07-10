@@ -14,7 +14,7 @@ to provide consistent audio processing behavior.
 GPU acceleration is used when available through CuPy.
 """
 
-from typing import Tuple, Union, Optional
+from typing import Any, Tuple, Union
 
 import librosa
 import numpy as np
@@ -30,7 +30,7 @@ logger = setup_logging()
 # Keeping them here avoids duplicated logic and keeps audio-processing concerns
 # in one location.
 
-def load_audio(audio_path: str, sr: int = 22050, use_gpu: bool = True) -> Tuple[Union[np.ndarray, 'cp.ndarray'], int]:
+def load_audio(audio_path: str, sr: int = 22050, use_gpu: bool = True) -> Tuple[Union[np.ndarray, Any], int]:
     """Load and normalize audio from various file formats.
     
     Args:
@@ -60,7 +60,7 @@ def load_audio(audio_path: str, sr: int = 22050, use_gpu: bool = True) -> Tuple[
 
 
 def extract_onset_envelope(
-    y: Union[np.ndarray, 'cp.ndarray'],
+    y: Union[np.ndarray, Any],
     sr: int,
     *,
     hop_length: int = 512,
@@ -69,7 +69,7 @@ def extract_onset_envelope(
     n_mels: int = 128,
     rms_threshold: float = 0.01,
     use_gpu: bool = True,
-) -> Union[np.ndarray, 'cp.ndarray']:
+) -> Union[np.ndarray, Any]:
     """Extract a normalized onset strength envelope from audio data.
     
     This function computes a mel spectrogram, converts it to log scale,

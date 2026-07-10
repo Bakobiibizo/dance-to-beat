@@ -39,7 +39,6 @@ def _create_test_audio(path, duration=3.0, sr=22050):
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason="Integration test requires moviepy and may be slow")
 def test_create_rotating_video():
     """Test that the video generation pipeline works end-to-end."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -49,12 +48,17 @@ def test_create_rotating_video():
         output_path = os.path.join(tmpdir, "test_output.mp4")
         
         _create_test_image(img_path)
-        _create_test_audio(audio_path)
+        _create_test_audio(audio_path, duration=1.0)
         
         # Verify the test files were created successfully
         assert os.path.exists(img_path)
         assert os.path.exists(audio_path)
         
-        # Note: Full video generation is skipped in automated tests
-        # as it requires moviepy and may be slow/resource intensive
-        # In a real CI environment, this would be run with proper setup
+        create_rotating_video(img_path, audio_path, output_path, effects=["pulse"], use_gpu=False)
+        assert os.path.getsize(output_path) > 1_000
+
+        from moviepy.video.io.VideoFileClip import VideoFileClip
+        with VideoFileClip(output_path) as clip:
+            assert clip.duration == pytest.approx(1.0, abs=0.1)
+            assert clip.audio is not None
+            assert clip.size == [128, 128]

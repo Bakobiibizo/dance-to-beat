@@ -1,18 +1,44 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "video-scripts"
-version = "0.1.0"
-description = "Add your description here"
+name = "dance-to-beat"
+version = "1.0.0"
+description = "Create beat-synchronized music visualizer videos from an image and audio"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
+license = "MIT"
 dependencies = [
-    "librosa>=0.9.0",
-    "matplotlib>=3.10.3",
-    "moviepy>=1.0.3",
-    "numpy>=1.21.0",
-    "opencv-python>=4.5.0",
+    "librosa>=0.11,<1",
+    "moviepy>=2.2,<3",
+    "numpy>=2,<3",
+    "opencv-python>=4.10,<5",
+    "soundfile>=0.13,<1",
 ]
 
-[tool.setuptools]
-packages = [
-    "src",
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "ruff>=0.11,<1",
 ]
+
+[project.scripts]
+rotate-to-beat = "rotate_to_beat_cli:main"
+
+[tool.setuptools]
+py-modules = ["rotate_to_beat_cli", "circle_image"]
+
+[tool.setuptools.packages.find]
+include = ["src", "src.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: generates a real video with ffmpeg"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]

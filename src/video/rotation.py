@@ -15,6 +15,7 @@ This is the canonical implementation for video generation in the library.
 """
 
 import os
+import tempfile
 import cv2
 import logging
 import numpy as np
@@ -449,7 +450,13 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, sub
 
     logger.info(f"Image: {image_path}, Audio: {audio_path}, Output: {output_path}, Effects: {effects}")
     effects = effects or []
-    temp_video = 'output/temp_video.mp4'
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(output_dir, exist_ok=True)
+    temp_handle = tempfile.NamedTemporaryFile(
+        prefix="dance-to-beat-", suffix=".mp4", dir=output_dir, delete=False
+    )
+    temp_video = temp_handle.name
+    temp_handle.close()
 
     try:
         with AudioFileClip(audio_path) as audio_clip:
@@ -845,9 +852,6 @@ def create_rotating_video(image_path, audio_path, output_path, effects=None, sub
                     cv2.cuda.Stream.synchronize(stream)
                     cv2.cuda.GpuMat().release()
             writer.release()
-            if int(t * fps) < 3:
-                cv2.imwrite(f"debug_frame_{int(t*fps)}.png", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-            
             with VideoFileClip(temp_video) as video:
                 final = video.with_audio(audio_clip)
                 final.write_videofile(output_path, fps=fps)
